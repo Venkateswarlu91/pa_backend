@@ -1,12 +1,14 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db import get_db_connection
+
+from flask import request, jsonify
 from datetime import timedelta
+
 app = Flask(__name__)
-CORS(app, origins=[
-    "http://localhost:3000",
-    "https://your-react-site.netlify.app"
-])
+
+# Allow only local React app
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
  # allow frontend
 
 # --------- TEST HOME ---------
@@ -145,36 +147,52 @@ def add_appointment():
 
 
 # --------- GET APPOINTMENTS (with optional date) ---------
+# --------- GET APPOINTMENTS (with optional date filter) ---------
 @app.route("/appointments", methods=["GET"])
 def get_all_appointments():
-    date_filter = request.args.get("date")  # optional ?date=YYYY-MM-DD
+    date_filter = request.args.get("date")  # ?date=YYYY-MM-DD
     conn = get_db_connection()
+
     try:
         with conn.cursor() as cursor:
             if date_filter:
-                cursor.execute(
-                    "SELECT * FROM appointments WHERE date=%s ORDER BY date, start_time",
-                    (date_filter,)
-                )
+                sql = """
+                    SELECT * FROM appointments
+                    WHERE date = %s
+                    ORDER BY date, start_time
+                """
+                cursor.execute(sql, (date_filter,))
             else:
-                cursor.execute(
-                    "SELECT * FROM appointments ORDER BY date, start_time"
-                )
+                sql = """
+                    SELECT * FROM appointments
+                    ORDER BY date, start_time
+                """
+                cursor.execute(sql)
+
             data = cursor.fetchall()
 
-            # Convert date and times to strings for JSON
+            # Convert DATE and TIME to string for JSON
             for appt in data:
-                appt["date"] = appt["date"].strftime("%Y-%m-%d") if appt.get("date") else ""
-                for key in ["start_time", "end_time"]:
-                    val = appt.get(key)
-                    if isinstance(val, timedelta):
-                        total_seconds = int(val.total_seconds())
-                        hours = total_seconds // 3600
-                        minutes = (total_seconds % 3600) // 60
-                        seconds = total_seconds % 60
-                        appt[key] = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                    elif val is not None:
-                        appt[key] = str(val)
+                # Date
+                if appt.get("date"):
+                    appt["date"] = appt["date"].strftime("%Y-%m-%d")
+                else:
+                    appt["date"] = ""
+
+                # Time fields
+                for field in ["start_time", "end_time"]:
+                    value = appt.get(field)
+
+                    if isinstance(value, timedelta):
+                        seconds = int(value.total_seconds())
+                        hours = seconds // 3600
+                        minutes = (seconds % 3600) // 60
+                        appt[field] = f"{hours:02d}:{minutes:02d}"
+                    elif value:
+                        appt[field] = str(value)
+                    else:
+                        appt[field] = ""
+
     finally:
         conn.close()
 
@@ -264,6 +282,7 @@ def get_appointments_by_range():
 
 
 # --------- RUN APP ---------
+
 if __name__ == "__main__":
-   app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True, port=5000)
 
