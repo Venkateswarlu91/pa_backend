@@ -277,12 +277,8 @@ def get_appointments_by_range():
                 appt["end_time"] = str(appt["end_time"])
     finally:
         conn.close()
-
+        
     return jsonify(data)
-
-
 # --------- RUN APP ---------
-
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
-
