@@ -295,5 +295,6 @@ def delete_appointment(id):
     return jsonify({"success": True, "message": "Appointment deleted"}), 200
 
 # ------------------ RUN ------------------
+
 if __name__ == "__main__":
     app.run()
