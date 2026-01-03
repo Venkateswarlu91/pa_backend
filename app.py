@@ -1,284 +1,299 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, date
 from db import get_db_connection
 
-from flask import request, jsonify
-from datetime import timedelta
-
 app = Flask(__name__)
+CORS(app)
 
-# Allow only local React app
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
- # allow frontend
+# ------------------ UTIL ------------------
+def delete_expired_appointments():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM appointments WHERE date < %s",
+                (date.today(),)
+            )
+            conn.commit()
+    finally:
+        conn.close()
 
-# --------- TEST HOME ---------
+# ------------------ HOME ------------------
 @app.route("/")
 def home():
     return "Backend running successfully"
 
-# --------- REGISTER ---------
+# ------------------ REGISTER ------------------
 @app.route("/register", methods=["POST"])
 def register():
     data = request.get_json()
-    if not data:
-        return jsonify({"success": False, "message": "No data received"}), 400
 
-    name = data.get("name").strip()
-    email = data.get("email").strip()
-    mobile = data.get("mobile").strip()
-    password = data.get("password").strip()
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip()
+    mobile = data.get("mobile", "").strip()
+    password = data.get("password", "").strip()
+
+    if not name or not email or not password:
+        return jsonify({"success": False, "message": "All fields required"}), 400
+
+    hashed_password = generate_password_hash(password)
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM users WHERE email=%s", (email,))
+            cursor.execute("SELECT id FROM users WHERE email=%s", (email,))
             if cursor.fetchone():
                 return jsonify({"success": False, "message": "Email already exists"}), 400
 
             cursor.execute(
                 "INSERT INTO users (name, email, phone, password) VALUES (%s,%s,%s,%s)",
-                (name, email, mobile, password)
+                (name, email, mobile, hashed_password)
             )
             conn.commit()
-            user_id = cursor.lastrowid
     finally:
         conn.close()
 
-    return jsonify({"success": True, "message": "Registration successful", "user_id": user_id})
+    return jsonify({"success": True, "message": "Registration successful"}), 201
 
-# --------- LOGIN ---------
+# ------------------ LOGIN ------------------
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json()
-    if not data:
-        return jsonify({"success": False, "message": "No data received"}), 400
-
-    email = data.get("email").strip()
-    password = data.get("password").strip()
+    email = data.get("email", "")
+    password = data.get("password", "")
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT * FROM users WHERE email=%s AND password=%s",
-                (email, password)
+                "SELECT id, name, email, password FROM users WHERE email=%s",
+                (email,)
             )
             user = cursor.fetchone()
     finally:
         conn.close()
 
-    if user:
-        return jsonify({
-            "success": True,
-            "message": "Login Successful",
-            "user": {
-                "id": user["id"],
-                "name": user["name"],
-                "email": user["email"]
-            }
-        })
-    else:
-        return jsonify({"success": False, "message": "Invalid Email or Password"}), 401
+    if not user or not check_password_hash(user["password"], password):
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
-# --------- ADD APPOINTMENT ---------
-# --------- ADD APPOINTMENT ---------
+    return jsonify({"success": True, "user": user}), 200
+
+# ------------------ ADD APPOINTMENT ------------------
 @app.route("/appointments", methods=["POST"])
 def add_appointment():
+    delete_expired_appointments()
     data = request.get_json()
-    if not data:
-        return jsonify({"success": False, "message": "No data received"}), 400
+
+    start_time = data.get("startTime") or data.get("start_time")
+    end_time = data.get("endTime") or data.get("end_time")
+
+    if not start_time or not end_time:
+        return jsonify({"success": False, "message": "Start and end time required"}), 400
+
+    appt_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+
+    if appt_date < date.today():
+        return jsonify({"success": False, "message": "Past date not allowed"}), 400
+
+    if appt_date == date.today() and start_time <= datetime.now().strftime("%H:%M"):
+        return jsonify({"success": False, "message": "Past time not allowed"}), 400
+
+    if end_time <= start_time:
+        return jsonify({"success": False, "message": "Invalid time range"}), 400
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT id FROM appointments
+                WHERE date=%s AND (%s < end_time AND %s > start_time)
+            """, (data["date"], start_time, end_time))
 
-            # 🔴 CHECK FOR TIME CONFLICT AND GET EXISTING SLOT
-            conflict_sql = """
-                SELECT date, start_time, end_time
-                FROM appointments
-                WHERE date = %s
-                AND (%s < end_time AND %s > start_time)
-            """
+            if cursor.fetchone():
+                return jsonify({"success": False, "message": "Time slot already booked"}), 409
 
-            cursor.execute(conflict_sql, (
-                data["date"],
-                data["startTime"],
-                data["endTime"]
-            ))
-
-            conflict = cursor.fetchone()
-
-            if conflict:
-                return jsonify({
-                    "success": False,
-                    "message": f"Already booked on {conflict['date']} from {conflict['start_time']} to {conflict['end_time']}"
-                }), 409
-
-            # ✅ INSERT IF NO CONFLICT
-            insert_sql = """
+            cursor.execute("""
                 INSERT INTO appointments
                 (user_id, title, date, start_time, end_time, type, location, notes, status)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """
-
-            cursor.execute(insert_sql, (
+            """, (
                 data["user_id"],
                 data["title"],
                 data["date"],
-                data["startTime"],
-                data["endTime"],
+                start_time,
+                end_time,
                 data["type"],
                 data.get("location", ""),
                 data.get("notes", ""),
-                data.get("status", "Pending")
+                "Pending"
             ))
-
             conn.commit()
-            appointment_id = cursor.lastrowid
+    finally:
+        conn.close()
+
+    return jsonify({"success": True, "message": "Appointment added"}), 201
+
+# ------------------ GET APPOINTMENTS ------------------
+@app.route("/appointments", methods=["GET"])
+def get_appointments():
+    delete_expired_appointments()
+    filter_date = request.args.get("date")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            if filter_date:
+                cursor.execute(
+                    "SELECT * FROM appointments WHERE date=%s ORDER BY start_time",
+                    (filter_date,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM appointments ORDER BY date, start_time"
+                )
+
+            data = cursor.fetchall()
+            for a in data:
+                a["date"] = a["date"].strftime("%Y-%m-%d")
+                a["start_time"] = str(a["start_time"])
+                a["end_time"] = str(a["end_time"])
+    finally:
+        conn.close()
+
+    return jsonify(data), 200
+
+
+
+
+
+# ---------- GET APPOINTMENTS BY DATE RANGE ----------
+@app.route("/appointments/range", methods=["GET"])
+def get_appointments_by_range():
+
+    start_date = request.args.get("start")
+    end_date = request.args.get("end")
+
+    if not start_date or not end_date:
+        return jsonify({
+            "success": False,
+            "message": "start and end dates are required"
+        }), 400
+
+    try:
+        start_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        if end_obj < start_obj:
+            return jsonify({
+                "success": False,
+                "message": "End date cannot be before start date"
+            }), 400
+
+    except ValueError:
+        return jsonify({
+            "success": False,
+            "message": "Invalid date format (YYYY-MM-DD)"
+        }), 400
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT *
+                FROM appointments
+                WHERE date BETWEEN %s AND %s
+                ORDER BY date, start_time
+            """, (start_date, end_date))
+
+            appointments = cursor.fetchall()
+
+            # format date & time
+            for appt in appointments:
+                appt["date"] = appt["date"].strftime("%Y-%m-%d")
+                appt["start_time"] = str(appt["start_time"])
+                appt["end_time"] = str(appt["end_time"])
 
     finally:
         conn.close()
 
     return jsonify({
         "success": True,
-        "message": "Appointment booked successfully",
-        "id": appointment_id
-    })
+        "appointments": appointments
+    }), 200
 
+# ------------------ UPDATE APPOINTMENT ------------------
+@app.route("/appointments/<int:id>", methods=["PUT"])
+def update_appointment(id):
+    delete_expired_appointments()
+    data = request.get_json()
 
-# --------- GET APPOINTMENTS (with optional date) ---------
-# --------- GET APPOINTMENTS (with optional date filter) ---------
-@app.route("/appointments", methods=["GET"])
-def get_all_appointments():
-    date_filter = request.args.get("date")  # ?date=YYYY-MM-DD
+    start_time = data.get("startTime") or data.get("start_time")
+    end_time = data.get("endTime") or data.get("end_time")
+
+    if not start_time or not end_time:
+        return jsonify({"success": False, "message": "Start and end time required"}), 400
+
+    appt_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+
+    if appt_date < date.today():
+        return jsonify({"success": False, "message": "Past date not allowed"}), 400
+
+    if end_time <= start_time:
+        return jsonify({"success": False, "message": "Invalid time range"}), 400
+
     conn = get_db_connection()
-
     try:
         with conn.cursor() as cursor:
-            if date_filter:
-                sql = """
-                    SELECT * FROM appointments
-                    WHERE date = %s
-                    ORDER BY date, start_time
-                """
-                cursor.execute(sql, (date_filter,))
-            else:
-                sql = """
-                    SELECT * FROM appointments
-                    ORDER BY date, start_time
-                """
-                cursor.execute(sql)
+            cursor.execute("SELECT id FROM appointments WHERE id=%s", (id,))
+            if not cursor.fetchone():
+                return jsonify({"success": False, "message": "Appointment not found"}), 404
 
-            data = cursor.fetchall()
+            cursor.execute("""
+                SELECT id FROM appointments
+                WHERE date=%s AND id!=%s AND (%s < end_time AND %s > start_time)
+            """, (data["date"], id, start_time, end_time))
 
-            # Convert DATE and TIME to string for JSON
-            for appt in data:
-                # Date
-                if appt.get("date"):
-                    appt["date"] = appt["date"].strftime("%Y-%m-%d")
-                else:
-                    appt["date"] = ""
+            if cursor.fetchone():
+                return jsonify({"success": False, "message": "Time conflict"}), 409
 
-                # Time fields
-                for field in ["start_time", "end_time"]:
-                    value = appt.get(field)
-
-                    if isinstance(value, timedelta):
-                        seconds = int(value.total_seconds())
-                        hours = seconds // 3600
-                        minutes = (seconds % 3600) // 60
-                        appt[field] = f"{hours:02d}:{minutes:02d}"
-                    elif value:
-                        appt[field] = str(value)
-                    else:
-                        appt[field] = ""
-
+            cursor.execute("""
+                UPDATE appointments
+                SET title=%s, date=%s, start_time=%s, end_time=%s,
+                    status=%s, location=%s, notes=%s
+                WHERE id=%s
+            """, (
+                data["title"],
+                data["date"],
+                start_time,
+                end_time,
+                data.get("status", "Pending"),
+                data.get("location", ""),
+                data.get("notes", ""),
+                id
+            ))
+            conn.commit()
     finally:
         conn.close()
 
-    return jsonify(data)
+    return jsonify({"success": True, "message": "Appointment updated"}), 200
 
-
-# --------- UPDATE APPOINTMENT ---------
-@app.route("/appointments/<int:id>", methods=["PUT"])
-def update_appointment(id):
-    data = request.json
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    sql = """
-        UPDATE appointments
-        SET
-            title=%s,
-            date=%s,
-            start_time=%s,
-            end_time=%s,
-            status=%s,
-            location=%s,
-            notes=%s
-        WHERE id=%s
-    """
-
-    cursor.execute(sql, (
-        data["title"],
-        data["date"],
-        data["start_time"],
-        data["end_time"],
-        data["status"],
-        data.get("location"),
-        data.get("notes"),
-        id
-    ))
-
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    return jsonify({"message": "Appointment updated successfully"})
-
-
-# --------- DELETE APPOINTMENT ---------
+# ------------------ DELETE APPOINTMENT ------------------
 @app.route("/appointments/<int:id>", methods=["DELETE"])
 def delete_appointment(id):
     conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("DELETE FROM appointments WHERE id=%s", (id,))
-    conn.commit()
-
-    cursor.close()
-    conn.close()
-
-    return jsonify({"message": "Appointment deleted"})
-# --------- GET APPOINTMENTS BY DATE RANGE ---------
-@app.route("/appointments/range", methods=["GET"])
-def get_appointments_by_range():
-    start_date = request.args.get("start")
-    end_date = request.args.get("end")
-
-    if not start_date or not end_date:
-        return jsonify({"message": "Start and End date required"}), 400
-
-    conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT * FROM appointments
-                WHERE date BETWEEN %s AND %s
-                ORDER BY date, start_time
-            """, (start_date, end_date))
-
-            data = cursor.fetchall()
-
-            for appt in data:
-                appt["date"] = appt["date"].strftime("%Y-%m-%d")
-                appt["start_time"] = str(appt["start_time"])
-                appt["end_time"] = str(appt["end_time"])
+            cursor.execute("DELETE FROM appointments WHERE id=%s", (id,))
+            if cursor.rowcount == 0:
+                return jsonify({"success": False, "message": "Not found"}), 404
+            conn.commit()
     finally:
         conn.close()
-        
-    return jsonify(data)
-# --------- RUN APP ---------
+
+    return jsonify({"success": True, "message": "Appointment deleted"}), 200
+
+# ------------------ RUN ------------------
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run()

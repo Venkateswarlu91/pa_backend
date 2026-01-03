@@ -1,5 +1,4 @@
 import pymysql
-pymysql.install_as_MySQLdb()
 
 def get_db_connection():
     return pymysql.connect(
